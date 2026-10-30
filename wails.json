@@ -1,0 +1,8 @@
+{
+  "name": "SATSSTV-Go",
+  "outputfilename": "SATSSTV-Go",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "auto"
+}

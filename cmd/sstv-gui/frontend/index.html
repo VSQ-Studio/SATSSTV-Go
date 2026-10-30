@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#101722">
+  <title>SATSSTV-Go</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-mark">S</div>
+        <div>
+          <h1>SATSSTV-Go</h1>
+          <p>Satellite Slow Scan Television Workstation</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="connection-state"><i></i><span>音频设备未连接</span></div>
+        <button id="openSettings" class="button button-quiet" type="button">⚙ 设备设置</button>
+      </div>
+    </header>
+
+    <section class="global-toolbar" aria-label="SSTV 全局模式设置">
+      <div class="toolbar-title">
+        <span class="eyebrow">GLOBAL SSTV PROFILE</span>
+        <strong>收发模式</strong>
+      </div>
+      <div class="toolbar-control mode-control">
+        <label for="mode">SSTV 模式</label>
+        <select id="mode"><option value="">正在读取模式列表…</option></select>
+        <small id="modeInfo">模式参数和编解码支持状态</small>
+      </div>
+      <div class="toolbar-control rate-control">
+        <label for="rate">音频采样率</label>
+        <select id="rate">
+          <option value="48000">48,000 Hz</option>
+          <option value="44100">44,100 Hz</option>
+          <option value="96000">96,000 Hz</option>
+        </select>
+      </div>
+      <div id="modeStatus" class="mode-status">等待模式</div>
+    </section>
+
+    <main class="workbench">
+      <section class="work-column rx-column" aria-labelledby="rxTitle">
+        <div class="column-heading">
+          <div class="heading-label"><span class="direction-mark rx-mark">RX</span><div><h2 id="rxTitle">接收</h2><p>Receive monitor</p></div></div>
+          <span class="state-pill state-idle"><i></i> 待机</span>
+        </div>
+
+        <article class="surface rx-image-panel">
+          <div class="panel-heading"><div><h3>接收图像</h3><p>Decoded SSTV image</p></div><span class="panel-index">01</span></div>
+          <div class="rx-image-stage" id="rxImageStage">
+            <div class="rx-placeholder">
+              <div class="placeholder-glyph">▧</div>
+              <strong>等待接收图像</strong>
+              <span>检测到 SSTV 信号并完成解码后，将在此显示图像</span>
+            </div>
+          </div>
+          <div class="rx-image-meta"><span>模式 <b id="rxDetectedMode">未检测</b></span><span>分辨率 <b id="rxResolution">---</b></span><span>进度 <b>0%</b></span></div>
+        </article>
+
+        <article class="surface spectrum-panel">
+          <div class="panel-heading"><div><h3>音频频谱</h3><p>Audio spectrum / waterfall monitor</p></div><span class="live-indicator"><i></i> INPUT IDLE</span></div>
+          <div class="spectrum-wrap"><canvas id="spectrum" width="900" height="250" aria-label="音频频谱显示区域"></canvas><div id="spectrumOverlay">连接接收音频设备后显示实时频谱</div></div>
+          <div class="spectrum-axis"><span>低频</span><span>音频频率范围</span><span>高频</span></div>
+        </article>
+
+        <div class="rx-bottom-row">
+          <div class="mini-stat"><span>接收电平</span><strong>-- dBFS</strong><div class="level-track"><i></i></div></div>
+          <div class="mini-stat"><span>解码状态</span><strong>未启动</strong><small>等待音频输入</small></div>
+        </div>
+        <div class="column-footnote"><span class="status-dot"></span> RX 实时采集与解码控制将在音频设备模块接入后启用</div>
+      </section>
+
+      <section class="work-column tx-column" aria-labelledby="txTitle">
+        <div class="column-heading">
+          <div class="heading-label"><span class="direction-mark tx-mark">TX</span><div><h2 id="txTitle">发送</h2><p>Transmit composer</p></div></div>
+          <span class="state-pill state-ready"><i></i> 编辑中</span>
+        </div>
+
+        <article class="surface tx-preview-panel">
+          <div class="panel-heading"><div><h3>最终发送画面</h3><p>Rendered SSTV frame preview</p></div><span class="panel-index">02</span></div>
+          <div class="tx-canvas-wrap"><canvas id="txCanvas" width="320" height="240"></canvas></div>
+          <div class="canvas-meta"><span id="canvasDimensions">320 × 240</span><span>图像与文字合成后进行 SSTV 编码</span></div>
+        </article>
+
+        <article class="surface composer-panel">
+          <div class="panel-heading composer-heading"><div><h3>自定义发送内容</h3><p>MMSSTV 风格图文模板编辑</p></div><span class="template-badge">TEMPLATE</span></div>
+          <div class="source-row">
+            <div class="source-summary"><span class="source-icon">▧</span><div><strong id="imageName">尚未选择背景图片</strong><small>PNG / JPEG</small></div></div>
+            <button id="choose" class="button button-secondary" type="button">选择图片</button>
+          </div>
+          <div class="form-grid">
+            <div class="field"><label for="myCall">本台呼号 <small>{MYCALL}</small></label><input id="myCall" type="text" placeholder="输入本台呼号" maxlength="24"></div>
+            <div class="field"><label for="hisCall">对方呼号 <small>{HISCALL}</small></label><input id="hisCall" type="text" placeholder="输入对方呼号" maxlength="24"></div>
+            <div class="field"><label for="qth">QTH <small>{QTH}</small></label><input id="qth" type="text" placeholder="位置 / 城市" maxlength="40"></div>
+            <div class="field"><label for="locator">网格 <small>{LOCATOR}</small></label><input id="locator" type="text" placeholder="例如 PM95" maxlength="12"></div>
+            <div class="field"><label for="report">信号报告 <small>{REPORT}</small></label><input id="report" type="text" placeholder="例如 595" maxlength="16"></div>
+            <div class="field"><label for="message">自定义消息 <small>{MESSAGE}</small></label><input id="message" type="text" placeholder="输入要发送的内容" maxlength="100"></div>
+          </div>
+          <div class="template-editor-head"><label for="templateText">画面文字布局</label><button id="resetTemplate" class="text-button" type="button">恢复默认模板</button></div>
+          <textarea id="templateText" rows="5" spellcheck="false">SSTV QSO  |  {MYCALL} → {HISCALL}
+QTH: {QTH}   LOC: {LOCATOR}
+REPORT: {REPORT}
+{MESSAGE}
+{DATE}  {TIME}</textarea>
+          <div class="token-row"><span>插入变量</span><button type="button" class="token" data-token="{MYCALL}">{MYCALL}</button><button type="button" class="token" data-token="{HISCALL}">{HISCALL}</button><button type="button" class="token" data-token="{QTH}">{QTH}</button><button type="button" class="token" data-token="{LOCATOR}">{LOCATOR}</button><button type="button" class="token" data-token="{REPORT}">{REPORT}</button><button type="button" class="token" data-token="{MESSAGE}">{MESSAGE}</button><button type="button" class="token" data-token="{DATE}">{DATE}</button><button type="button" class="token" data-token="{TIME}">{TIME}</button></div>
+          <div class="send-actions">
+            <div class="send-note"><strong id="txResult">画面已就绪</strong><small>当前操作会生成 WAV 文件，实时发射与 PTT 尚未接入</small></div>
+            <button id="encode" class="button button-primary" type="button">生成发送 WAV <span>↗</span></button>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <footer><span>SATSSTV-Go · Wails Desktop</span><span>RX / TX Integrated Workbench</span></footer>
+  </div>
+
+  <dialog id="settingsDialog" class="settings-dialog">
+    <div class="dialog-header"><div><span class="eyebrow">DEVICE CONFIGURATION</span><h2>设备设置</h2></div><button id="closeSettings" class="icon-button" type="button" aria-label="关闭">×</button></div>
+    <div class="settings-grid">
+      <section class="settings-card"><h3>电台控制</h3><label>控制方式</label><select disabled><option>Hamlib Net Rigctl</option></select><label>Rigctl 地址</label><input disabled value="127.0.0.1:4532"><label>PTT 方式</label><select disabled><option>RTS / DTR / VOX</option></select><p>电台连接和 PTT 操作流程尚未绑定到 GUI。</p></section>
+      <section class="settings-card"><h3>音频设备</h3><label>RX 输入设备</label><select disabled><option>设备枚举待接入</option></select><label>TX 输出设备</label><select disabled><option>设备枚举待接入</option></select><p>后端已有音频流基础模块，设备枚举及启动停止控制仍待接入。</p></section>
+    </div>
+  </dialog>
+  <script src="app.js"></script>
+</body>
+</html>
