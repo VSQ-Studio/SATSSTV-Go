@@ -1,0 +1,638 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"image/png"
+	"math"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/BH2VSQ/SATSSTV-Go/internal/audio"
+	"github.com/BH2VSQ/SATSSTV-Go/internal/radio/ptt"
+	"github.com/BH2VSQ/SATSSTV-Go/internal/sstv"
+	"github.com/wailsapp/wails/v2/pkg/runtime"
+)
+
+// AudioSettings stores device and PTT preferences. The first-run PTT mode is
+// manual so the application cannot unexpectedly key a radio on first launch.
+type AudioSettings struct {
+	SampleRate       int    `json:"sampleRate"`
+	CaptureDeviceID  string `json:"captureDeviceId"`
+	PlaybackDeviceID string `json:"playbackDeviceId"`
+	PTTMode          string `json:"pttMode"`
+	RigctlAddress    string `json:"rigctlAddress"`
+	SerialPort       string `json:"serialPort"`
+	ActiveHigh       bool   `json:"activeHigh"`
+	PTTLeadMS        int    `json:"pttLeadMs"`
+	PTTTailMS        int    `json:"pttTailMs"`
+}
+
+type AudioDeviceInfo struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	IsDefault bool   `json:"isDefault"`
+}
+
+type AudioDeviceLists struct {
+	Inputs  []AudioDeviceInfo `json:"inputs"`
+	Outputs []AudioDeviceInfo `json:"outputs"`
+}
+
+type AudioState struct {
+	Connected  bool   `json:"connected"`
+	RXActive   bool   `json:"rxActive"`
+	TXActive   bool   `json:"txActive"`
+	SampleRate int    `json:"sampleRate"`
+	PTTMode    string `json:"pttMode"`
+}
+
+type appAudioRuntime interface {
+	DeviceLists() (inputs, outputs []AudioDeviceInfo, err error)
+	StartReceive(ctx context.Context, onSamples func([]float32)) error
+	StopReceive() error
+	Transmit(ctx context.Context, samples []float32) error
+	Close() error
+}
+
+func defaultAudioSettings() AudioSettings {
+	return AudioSettings{SampleRate: 48_000, PTTMode: string(ptt.ModeManual), ActiveHigh: true, PTTLeadMS: 300, PTTTailMS: 250}
+}
+
+func (a *App) audioSettingsPath() (string, error) {
+	dir, err := a.settingsDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "audio.json"), nil
+}
+
+func (a *App) readAudioSettings() (AudioSettings, error) {
+	path, err := a.audioSettingsPath()
+	if err != nil {
+		return AudioSettings{}, err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return defaultAudioSettings(), nil
+	}
+	if err != nil {
+		return AudioSettings{}, err
+	}
+	cfg := defaultAudioSettings()
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return AudioSettings{}, fmt.Errorf("音频设置文件格式错误：%w", err)
+	}
+	return normalizeAudioSettings(cfg)
+}
+
+func normalizeAudioSettings(cfg AudioSettings) (AudioSettings, error) {
+	if cfg.SampleRate == 0 {
+		cfg.SampleRate = 48_000
+	}
+	if cfg.SampleRate < 8_000 || cfg.SampleRate > 192_000 {
+		return AudioSettings{}, fmt.Errorf("采样率必须在 8000 至 192000 Hz 之间")
+	}
+	cfg.PTTMode = strings.ToLower(strings.TrimSpace(cfg.PTTMode))
+	if cfg.PTTMode == "" {
+		cfg.PTTMode = string(ptt.ModeManual)
+	}
+	switch ptt.Mode(cfg.PTTMode) {
+	case ptt.ModeHamlib, ptt.ModeRTS, ptt.ModeDTR, ptt.ModeVOX, ptt.ModeManual:
+	default:
+		return AudioSettings{}, fmt.Errorf("未知 PTT 控制方式：%s", cfg.PTTMode)
+	}
+	cfg.RigctlAddress = strings.TrimSpace(cfg.RigctlAddress)
+	cfg.SerialPort = strings.TrimSpace(cfg.SerialPort)
+	if ptt.Mode(cfg.PTTMode) == ptt.ModeHamlib && cfg.RigctlAddress == "" {
+		return AudioSettings{}, errors.New("Hamlib PTT 需要填写 rigctld 地址")
+	}
+	if (ptt.Mode(cfg.PTTMode) == ptt.ModeRTS || ptt.Mode(cfg.PTTMode) == ptt.ModeDTR) && cfg.SerialPort == "" {
+		return AudioSettings{}, errors.New("RTS/DTR PTT 需要填写串口名称")
+	}
+	if cfg.PTTLeadMS < 0 || cfg.PTTLeadMS > 10_000 || cfg.PTTTailMS < 0 || cfg.PTTTailMS > 10_000 {
+		return AudioSettings{}, errors.New("PTT 前后延时必须在 0 至 10000 ms 之间")
+	}
+	return cfg, nil
+}
+
+func (a *App) GetAudioSettings() (AudioSettings, error) {
+	a.audioMu.Lock()
+	if a.audioSession != nil {
+		cfg := a.audioConfig
+		a.audioMu.Unlock()
+		return cfg, nil
+	}
+	a.audioMu.Unlock()
+	cfg, err := a.readAudioSettings()
+	if err != nil {
+		return AudioSettings{}, err
+	}
+	a.audioMu.Lock()
+	a.audioConfig = cfg
+	a.audioMu.Unlock()
+	return cfg, nil
+}
+
+func (a *App) saveAudioSettings(input AudioSettings) (AudioSettings, error) {
+	a.txOpMu.Lock()
+	defer a.txOpMu.Unlock()
+	cfg, err := normalizeAudioSettings(input)
+	if err != nil {
+		return AudioSettings{}, err
+	}
+	a.audioMu.Lock()
+	connected := a.audioSession != nil
+	current := a.audioConfig
+	a.audioMu.Unlock()
+	if connected && cfg != current {
+		return AudioSettings{}, errors.New("音频设备运行期间无法直接保存变更，请使用“保存并应用”以安全重建音频流")
+	}
+	path, err := a.audioSettingsPath()
+	if err != nil {
+		return AudioSettings{}, err
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return AudioSettings{}, err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return AudioSettings{}, err
+	}
+	if err := replaceFilePreservingPrevious(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return AudioSettings{}, err
+	}
+	a.audioMu.Lock()
+	a.audioConfig = cfg
+	a.audioMu.Unlock()
+	return cfg, nil
+}
+
+func (a *App) GetAudioDevices() (AudioDeviceLists, error) { return enumerateAppAudioDevices() }
+
+// InitializeAudio is invoked automatically when the workbench opens. It opens
+// the configured shared-mode audio endpoints and starts continuous RX.
+func (a *App) InitializeAudio(rxModeID string) error {
+	a.audioMu.Lock()
+	connected := a.audioSession != nil
+	rxActive := a.rxCancel != nil
+	a.audioMu.Unlock()
+	if !connected {
+		if err := a.connectAudio(); err != nil {
+			return err
+		}
+	}
+	if rxActive {
+		return a.setRXMode(rxModeID)
+	}
+	return a.startRX(rxModeID)
+}
+
+// ApplyAudioSettings saves updated device/PTT preferences, recreates the
+// streams, and immediately resumes RX with the currently selected RX mode.
+func (a *App) ApplyAudioSettings(input AudioSettings, rxModeID string) error {
+	a.audioMu.Lock()
+	txActive := a.txCancel != nil
+	a.audioMu.Unlock()
+	if txActive {
+		return errors.New("正在发射，结束 TX 后才能应用音频设置")
+	}
+	if err := a.stopRX(); err != nil {
+		return fmt.Errorf("停止旧 RX 流失败：%w", err)
+	}
+	if err := a.disconnectAudio(); err != nil {
+		return fmt.Errorf("释放旧音频资源失败：%w", err)
+	}
+	if _, err := a.saveAudioSettings(input); err != nil {
+		return err
+	}
+	if err := a.connectAudio(); err != nil {
+		return err
+	}
+	return a.startRX(rxModeID)
+}
+
+func (a *App) connectAudio() error {
+	a.txOpMu.Lock()
+	defer a.txOpMu.Unlock()
+	cfg, err := a.readAudioSettings()
+	if err != nil {
+		return err
+	}
+	if _, err := normalizeAudioSettings(cfg); err != nil {
+		return err
+	}
+	a.audioMu.Lock()
+	if a.audioSession != nil {
+		a.audioMu.Unlock()
+		return errors.New("音频设备已经连接")
+	}
+	a.audioMu.Unlock()
+	session, err := newAppAudioRuntime(cfg)
+	if err != nil {
+		return fmt.Errorf("连接音频设备失败：%w", err)
+	}
+	a.audioMu.Lock()
+	if a.audioSession != nil {
+		a.audioMu.Unlock()
+		_ = session.Close()
+		return errors.New("音频设备连接状态发生变化，请重试")
+	}
+	a.audioSession, a.audioConfig = session, cfg
+	a.audioMu.Unlock()
+	a.emitAudioState()
+	return nil
+}
+
+func (a *App) disconnectAudio() error {
+	a.rxOpMu.Lock()
+	defer a.rxOpMu.Unlock()
+	a.txOpMu.Lock()
+	defer a.txOpMu.Unlock()
+	a.audioMu.Lock()
+	session, rxCancel, txCancel := a.audioSession, a.rxCancel, a.txCancel
+	a.audioSession, a.rxCancel, a.txCancel = nil, nil, nil
+	a.txGeneration++ // invalidate an in-flight worker before a new session can start
+	a.audioMu.Unlock()
+	if rxCancel != nil {
+		rxCancel()
+	}
+	if txCancel != nil {
+		txCancel()
+	}
+	var err error
+	if session != nil {
+		err = session.Close()
+	}
+	a.rxDecoderMu.Lock()
+	a.rxDecoder = nil
+	a.rxDecoderMu.Unlock()
+	a.emitAudioState()
+	return err
+}
+
+func (a *App) GetAudioState() AudioState {
+	a.audioMu.Lock()
+	defer a.audioMu.Unlock()
+	state := AudioState{Connected: a.audioSession != nil, SampleRate: a.audioConfig.SampleRate, PTTMode: a.audioConfig.PTTMode, RXActive: a.rxCancel != nil, TXActive: a.txCancel != nil}
+	return state
+}
+
+func (a *App) emitAudioState() {
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "audio:state", a.GetAudioState())
+	}
+}
+
+func (a *App) setRXMode(modeID string) error {
+	a.rxDecoderMu.Lock()
+	defer a.rxDecoderMu.Unlock()
+	if a.rxDecoder == nil {
+		return nil
+	}
+	return a.rxDecoder.SetMode(modeID)
+}
+
+func (a *App) startRX(modeID string) error {
+	a.rxOpMu.Lock()
+	defer a.rxOpMu.Unlock()
+	a.audioMu.Lock()
+	session, cfg := a.audioSession, a.audioConfig
+	if session == nil {
+		a.audioMu.Unlock()
+		return errors.New("RX 音频流尚未初始化，请检查设备设置中的输入设备")
+	}
+	if a.rxCancel != nil {
+		a.audioMu.Unlock()
+		return errors.New("RX 已经处于运行状态")
+	}
+	a.audioMu.Unlock()
+
+	decoder, err := sstv.NewStreamDecoder(cfg.SampleRate)
+	if err == nil {
+		err = decoder.SetMode(modeID)
+	}
+	if err != nil {
+		return err
+	}
+	baseCtx := a.ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	rxCtx, cancel := context.WithCancel(baseCtx)
+	// Hold several minutes of mono audio so long-frame DSP work cannot
+	// immediately overflow the handoff queue at common device block sizes.
+	queue := make(chan []float32, 16_384)
+	var dropped atomic.Uint64
+
+	a.rxDecoderMu.Lock()
+	a.rxDecoder = decoder
+	a.rxDecoderMu.Unlock()
+	a.audioMu.Lock()
+	if a.audioSession != session || a.rxCancel != nil {
+		a.audioMu.Unlock()
+		cancel()
+		a.rxDecoderMu.Lock()
+		a.rxDecoder = nil
+		a.rxDecoderMu.Unlock()
+		return errors.New("音频设备状态已变化，请重试启动 RX")
+	}
+	a.rxCancel = cancel
+	a.audioMu.Unlock()
+
+	if err := session.StartReceive(rxCtx, func(block []float32) {
+		select {
+		case queue <- block:
+		default:
+			dropped.Add(1)
+		}
+	}); err != nil {
+		cancel()
+		a.rxDecoderMu.Lock()
+		a.rxDecoder = nil
+		a.rxDecoderMu.Unlock()
+		a.audioMu.Lock()
+		a.rxCancel = nil
+		a.audioMu.Unlock()
+		return err
+	}
+	go a.runRXWorker(rxCtx, queue, decoder, cfg.SampleRate, &dropped, session)
+	a.emitAudioState()
+	return nil
+}
+
+func (a *App) stopRX() error {
+	a.rxOpMu.Lock()
+	defer a.rxOpMu.Unlock()
+	a.audioMu.Lock()
+	cancel, session := a.rxCancel, a.audioSession
+	a.rxCancel = nil
+	a.audioMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	var err error
+	if session != nil {
+		err = session.StopReceive()
+	}
+	a.rxDecoderMu.Lock()
+	a.rxDecoder = nil
+	a.rxDecoderMu.Unlock()
+	a.emitAudioState()
+	return err
+}
+
+type captureDiagnostics interface {
+	DroppedCaptureBlocks() uint64
+	CaptureError() string
+}
+
+func (a *App) runRXWorker(ctx context.Context, queue <-chan []float32, decoder *sstv.StreamDecoder, sampleRate int, dropped *atomic.Uint64, session appAudioRuntime) {
+	lastTelemetry := time.Time{}
+	lastCaptureError := ""
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case block := <-queue:
+			if len(block) == 0 {
+				continue
+			}
+			pcm := audio.Float32ToPCM16(block)
+			if time.Since(lastTelemetry) >= 80*time.Millisecond {
+				level := rmsDBFS(block)
+				spectrum := makeSpectrum(block, sampleRate)
+				droppedBlocks := dropped.Load()
+				if diagnostics, ok := session.(captureDiagnostics); ok {
+					droppedBlocks += diagnostics.DroppedCaptureBlocks()
+					if captureErr := diagnostics.CaptureError(); captureErr != "" && captureErr != lastCaptureError {
+						lastCaptureError = captureErr
+						if a.ctx != nil {
+							runtime.EventsEmit(a.ctx, "rx:error", "音频采集回调异常："+captureErr)
+						}
+					}
+				}
+				if a.ctx != nil {
+					runtime.EventsEmit(a.ctx, "audio:telemetry", map[string]any{"dbfs": level, "spectrum": spectrum, "droppedBlocks": droppedBlocks})
+				}
+				lastTelemetry = time.Now()
+			}
+			// setRXMode and stopRX may update or clear the stream decoder while
+			// capture is active. Keep the decoder state serialized with those
+			// control operations; capture callbacks themselves never take this lock.
+			a.rxDecoderMu.Lock()
+			events, err := decoder.Feed(ctx, pcm)
+			a.rxDecoderMu.Unlock()
+			if err != nil {
+				if ctx.Err() == nil && a.ctx != nil {
+					runtime.EventsEmit(a.ctx, "rx:error", err.Error())
+				}
+				continue
+			}
+			for _, event := range events {
+				var buf bytes.Buffer
+				if err := png.Encode(&buf, event.Image); err != nil {
+					continue
+				}
+				dataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
+				now := time.Now()
+				_, saveErr := a.saveAlbumImage(event.Image, "rx", event.Mode.ID, "实时接收完成")
+				payload := map[string]any{"image": dataURL, "mode": event.Mode.Name, "modeId": event.Mode.ID, "width": event.Mode.Width, "height": event.Mode.Height, "timestamp": now.Format("2006-01-02 15:04:05"), "albumSaved": saveErr == nil}
+				if saveErr != nil {
+					payload["albumError"] = saveErr.Error()
+				}
+				if a.ctx != nil {
+					runtime.EventsEmit(a.ctx, "rx:frame", payload)
+				}
+			}
+		}
+	}
+}
+
+func rmsDBFS(samples []float32) float64 {
+	if len(samples) == 0 {
+		return -120
+	}
+	var sum float64
+	for _, v := range samples {
+		sum += float64(v * v)
+	}
+	rms := math.Sqrt(sum / float64(len(samples)))
+	if rms < 1e-6 {
+		return -120
+	}
+	return 20 * math.Log10(rms)
+}
+
+// makeSpectrum returns a compact logarithmic-independent FFT-like magnitude
+// trace over 900..2800 Hz. A Hann-windowed direct DFT is used for the small UI
+// telemetry window to avoid introducing another DSP dependency.
+func makeSpectrum(samples []float32, sampleRate int) []float64 {
+	const bins = 72
+	const size = 512
+	out := make([]float64, bins)
+	if len(samples) < 16 || sampleRate <= 0 {
+		return out
+	}
+	start := max(0, len(samples)-size)
+	window := samples[start:]
+	for bin := 0; bin < bins; bin++ {
+		freq := 900.0 + float64(bin)*(1900.0/float64(bins-1))
+		omega := 2 * math.Pi * freq / float64(sampleRate)
+		var re, im float64
+		for i, sample := range window {
+			w := 0.5 - 0.5*math.Cos(2*math.Pi*float64(i)/float64(max(1, len(window)-1)))
+			angle := omega * float64(i)
+			v := float64(sample) * w
+			re += v * math.Cos(angle)
+			im -= v * math.Sin(angle)
+		}
+		magnitude := math.Hypot(re, im) / float64(len(window))
+		out[bin] = math.Max(0, math.Min(1, magnitude*5))
+	}
+	return out
+}
+
+func (a *App) StartTX(dataURL, modeID string, sampleRate int) error {
+	img, err := decodeDataURL(dataURL)
+	if err != nil {
+		return err
+	}
+	spec, err := sstv.LookupMode(modeID)
+	if err != nil {
+		return err
+	}
+	if !spec.CodecReady {
+		return fmt.Errorf("%s 尚未实现编码器", spec.Name)
+	}
+	a.txOpMu.Lock()
+	a.audioMu.Lock()
+	session := a.audioSession
+	if session == nil {
+		a.audioMu.Unlock()
+		a.txOpMu.Unlock()
+		return errors.New("TX 音频输出尚未初始化，请在设备设置中检查所选输出设备")
+	}
+	if a.txCancel != nil {
+		a.audioMu.Unlock()
+		a.txOpMu.Unlock()
+		return errors.New("TX 已经处于运行状态")
+	}
+	if sampleRate != a.audioConfig.SampleRate {
+		a.audioMu.Unlock()
+		a.txOpMu.Unlock()
+		return fmt.Errorf("工作台采样率 %d Hz 与音频设备采样率 %d Hz 不一致", sampleRate, a.audioConfig.SampleRate)
+	}
+	baseCtx := a.ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	txCtx, cancel := context.WithCancel(baseCtx)
+	a.txGeneration++
+	txGeneration := a.txGeneration
+	a.txCancel = cancel
+	a.audioMu.Unlock()
+	a.txOpMu.Unlock()
+	a.emitAudioState()
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "tx:state", map[string]any{"state": "encoding", "message": "正在编码 SSTV 音频…"})
+	}
+	go func() {
+		defer func() {
+			cancel()
+			a.finishTX(txGeneration)
+		}()
+		samples, encodeErr := sstv.NewEncoder(sampleRate).Encode(txCtx, img, modeID)
+		if encodeErr != nil {
+			if errors.Is(encodeErr, context.Canceled) || errors.Is(txCtx.Err(), context.Canceled) {
+				a.emitTXState("stopped", "编码阶段已取消发射")
+			} else {
+				a.emitTXState("error", encodeErr.Error())
+			}
+			return
+		}
+		if err := txCtx.Err(); err != nil {
+			a.emitTXState("stopped", "发射已取消")
+			return
+		}
+		a.emitTXState("playing", "正在播放 SSTV 音频并执行 PTT 控制…")
+		if playErr := session.Transmit(txCtx, audio.PCM16ToFloat32(samples)); playErr != nil {
+			if errors.Is(playErr, context.Canceled) {
+				a.emitTXState("stopped", "发射已停止")
+			} else {
+				a.emitTXState("error", playErr.Error())
+			}
+			return
+		}
+		entry, saveErr := a.saveAlbumImage(img, "tx", modeID, "音频已播放至选定输出设备")
+		msg := "音频播放完成"
+		if saveErr == nil {
+			msg += "，已保存到 TX 相册"
+		}
+		if a.ctx != nil {
+			runtime.EventsEmit(a.ctx, "tx:complete", map[string]any{"message": msg, "albumEntry": entry, "albumSaved": saveErr == nil})
+		}
+		a.emitTXState("completed", msg)
+	}()
+	return nil
+}
+
+// finishTX clears the active TX marker only when it still belongs to the
+// worker being completed. Disconnect/reconnect or a subsequent transmission
+// increments txGeneration, protecting the new worker from stale cleanup.
+func (a *App) finishTX(generation uint64) {
+	a.audioMu.Lock()
+	if a.txGeneration == generation {
+		a.txCancel = nil
+	}
+	a.audioMu.Unlock()
+	a.emitAudioState()
+}
+
+func (a *App) StopTX() {
+	a.audioMu.Lock()
+	cancel := a.txCancel
+	a.audioMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (a *App) emitTXState(state, message string) {
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "tx:state", map[string]any{"state": state, "message": message})
+	}
+}
+
+func (a *App) shutdown(context.Context) {
+	a.rxOpMu.Lock()
+	defer a.rxOpMu.Unlock()
+	a.txOpMu.Lock()
+	defer a.txOpMu.Unlock()
+	a.audioMu.Lock()
+	session, rxCancel, txCancel := a.audioSession, a.rxCancel, a.txCancel
+	a.audioSession, a.rxCancel, a.txCancel = nil, nil, nil
+	a.txGeneration++
+	a.audioMu.Unlock()
+	if rxCancel != nil {
+		rxCancel()
+	}
+	if txCancel != nil {
+		txCancel()
+	}
+	if session != nil {
+		_ = session.Close()
+	}
+	a.rxDecoderMu.Lock()
+	a.rxDecoder = nil
+	a.rxDecoderMu.Unlock()
+}
