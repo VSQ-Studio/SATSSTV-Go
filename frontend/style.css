@@ -168,6 +168,11 @@
 .settings-grid .settings-check input{width:13px;height:13px;margin:0}
 .settings-grid .radio-settings input[type="number"]{width:100%}
 .settings-grid .radio-settings button{align-self:flex-start;margin-top:2px}
+.settings-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;padding-top:8px;border-top:1px solid #c3c9ce}
+.settings-footer .small-btn{height:30px;padding:0 16px;flex:none}
+.serial-row{display:flex;gap:4px;align-items:center}
+.serial-row select{flex:1;min-width:0}
+.serial-row .small-btn{flex:none;height:25px}
 .device-state{max-width:340px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 @media(max-width:760px){
   .settings-grid{grid-template-columns:1fr}
@@ -210,3 +215,135 @@
   .tx-pane .pane-heading{height:auto;min-height:25px}
   .tx-mode-control select{max-width:125px}
 }
+
+
+/* Live RX/TX progress and the single VOX-driven transmit toggle. */
+.rx-decode-progress,.tx-progress-wrap{display:flex;flex-direction:column;gap:3px;flex:none;padding:1px 3px 2px}
+.rx-decode-progress{height:24px}
+.tx-progress-wrap{height:25px;padding:0 2px 2px}
+.rx-progress-meta,.tx-progress-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#697681;font-size:9px;line-height:11px}
+.rx-progress-meta b,.tx-progress-meta b{color:#3e5969;font-variant-numeric:tabular-nums;font-size:9px}
+.rx-progress-track,.tx-progress-track{height:6px;flex:none;overflow:hidden;border:1px solid #b9c2c8;border-radius:2px;background:#dce1e4}
+.rx-progress-track i,.tx-progress-track i{display:block;width:0;height:100%;background:linear-gradient(90deg,#5bcefa,#86c8d9);transition:width .12s linear}
+.tx-progress-track i{background:linear-gradient(90deg,#78b98b,#5bcefa)}
+.tx-toggle-button{background:linear-gradient(#e3f5e8,#c7e8d0);border-color:#79ae88;color:#245b35;font-weight:800}
+.tx-toggle-button:hover{background:linear-gradient(#effaf2,#d6efdc);border-color:#5b9f70}
+.tx-toggle-button.tx-running{background:linear-gradient(#f9e5e7,#edc6ca);border-color:#ca7a82;color:#862c35}
+.tx-toggle-button.tx-running:hover{background:linear-gradient(#fff0f1,#f3d6d9);border-color:#b95c68}
+
+
+/* RX/TX mode strips live inside their respective panes. */
+.pane .modebar{
+  height:40px;flex:0 0 40px;min-width:0;gap:6px;padding:3px 5px;
+  background:#eceff1;border:1px solid #c4cbd0;border-radius:2px;
+  box-shadow:inset 0 1px 0 #fff;overflow:hidden;
+}
+.pane .modebar-label{width:68px;flex:0 0 68px;padding-left:1px}
+.pane .modebar-label b{font-size:9px}
+.pane .modebar-label small{font-size:7px}
+.pane .mode-slots{gap:3px;overflow-x:auto;overflow-y:hidden;padding:1px 1px 3px;scrollbar-width:thin}
+.pane .mode-slot{min-width:56px;height:26px;padding:0 6px;font-size:9px;border-radius:2px}
+.pane .auto-slot{min-width:50px}
+.pane .modebar-meta{width:115px;flex:0 0 115px;gap:2px;font-size:8px}
+.pane .modebar-meta select{height:19px;max-width:82px;font-size:9px}
+.tx-pane .modebar-meta{width:86px;flex-basis:86px}
+.tx-modebar .mode-slots{padding-right:4px}
+.pane .mode-slot:disabled{opacity:.38;cursor:not-allowed;background:#e2e4e5}
+.tone-toggle-button{background:linear-gradient(#fff6df,#f2dfad);border-color:#c3a65f;color:#624b18;font-weight:700}
+.tone-toggle-button:hover{background:linear-gradient(#fff9eb,#f5e8c7);border-color:#ae914b}
+.tone-toggle-button:disabled{opacity:.5;cursor:not-allowed}
+
+/* Per-layer outline editing for text and image components. */
+.outline-properties{display:flex;flex-direction:column;gap:3px;padding:3px 0;border-top:1px solid #d1d5d8}
+.outline-fields{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:4px}
+.outline-fields .property-field input[type=color]{height:21px;max-width:100%}
+.outline-properties .check-field{font-weight:700;color:#52616b}
+.outline-properties[hidden]{display:none}
+@media(max-width:1200px){
+  .pane .modebar-label{width:54px;flex-basis:54px}
+  .pane .modebar-meta{width:92px;flex-basis:92px}
+  .pane .mode-slot{min-width:50px;padding:0 4px;font-size:8px}
+}
+@media(max-width:760px){
+  .pane .modebar-meta{width:78px;flex-basis:78px}
+  .pane .modebar-meta select{max-width:68px}
+}
+
+/* Two-row mode strips: each row scrolls independently when the mode list is
+   wider than its pane, while keeping the original selection behavior. */
+.pane .modebar{
+  height:64px;
+  flex:0 0 64px;
+  align-items:center;
+}
+.pane .mode-slots{
+  display:flex;
+  flex:1 1 auto;
+  flex-direction:column;
+  gap:2px;
+  height:56px;
+  min-width:0;
+  overflow:hidden;
+  padding:0 1px;
+}
+.pane .mode-slot-row{
+  display:flex;
+  flex:1 1 0;
+  align-items:center;
+  gap:3px;
+  min-width:0;
+  min-height:0;
+  overflow-x:auto;
+  overflow-y:hidden;
+  scrollbar-width:thin;
+}
+.pane .mode-slot-row .mode-slot{flex:none}
+
+/* Persistent template image library */
+.image-library-dialog{width:min(860px,92vw);max-height:88vh;border:1px solid #929da6;background:#eef1f3;color:#26323b;box-shadow:0 12px 50px #0007;padding:12px;border-radius:3px}
+.image-library-dialog::backdrop{background:#111a22a8}
+.image-library-toolbar{display:flex;align-items:center;gap:7px}
+.image-library-dialog .dialog-title{height:34px;gap:12px}
+.image-library-dialog .dialog-title>div:first-child{display:flex;flex-direction:column;gap:2px}
+.image-library-dialog .dialog-title small{font-size:9px;color:#77838c}
+.image-library-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:9px;max-height:calc(88vh - 75px);overflow:auto;padding:2px}
+.image-library-card{min-width:0;border:1px solid #bbc3c9;background:#fbfcfc;padding:5px;display:grid;grid-template-columns:76px minmax(0,1fr);grid-template-rows:76px auto;gap:5px;box-shadow:0 1px 2px #0000000c}
+.image-library-card>img{width:76px;height:76px;object-fit:contain;background:#e5e9eb;border:1px solid #d5dade}
+.image-library-details{min-width:0;display:flex;flex-direction:column;gap:5px;justify-content:center}
+.image-library-details b{font-size:10px;color:#394651;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.image-library-details small{font-size:8px;color:#87919a}
+.image-library-actions{grid-column:1/-1;display:flex;gap:5px}
+.image-library-actions button{flex:1}
+.image-library-empty{grid-column:1/-1;min-height:150px;display:grid;place-items:center;text-align:center;color:#7e8992;font-size:10px;border:1px dashed #bac1c7;background:#f6f8f8;padding:12px}
+
+/* UI text is intentionally non-selectable; form values remain editable/selectable. */
+html, body, body * {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+input, textarea, select, [contenteditable="true"], .selectable-text {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+.language-select {
+  height: 25px;
+  min-width: 92px;
+  padding: 0 5px;
+  border: 1px solid #afb8bf;
+  border-radius: 3px;
+  background: linear-gradient(#fff,#e4e6e8);
+  color: #34414b;
+  font: 10px "Segoe UI","Microsoft YaHei",sans-serif;
+}
+.ptt-test-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 28px;
+  margin-top: 3px;
+}
+.ptt-test-row .small-btn { min-width: 145px; }
+.ptt-test-row .station-settings-status { flex: 1 1 120px; }

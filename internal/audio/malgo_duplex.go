@@ -10,6 +10,7 @@ import (
 	"math"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/gen2brain/malgo"
@@ -168,7 +169,11 @@ func (m *MalgoDuplex) StartCapture(ctx context.Context, onSamples func([]float32
 		defer freeMalgoDeviceID(deviceID)
 	}
 
-	queue := make(chan []float32, 96)
+	// Keep a modest jitter buffer on the native callback side. The application
+	// worker has its own 16-block queue; 16 blocks absorb short scheduler/UI
+	// pauses without hiding seconds of stale audio. Sustained overload still
+	// produces an explicit discontinuity marker rather than unbounded latency.
+	queue := make(chan []float32, 16)
 	workerCtx, cancel := context.WithCancel(context.Background())
 	dev, err := malgo.InitDevice(m.ctx.Context, cfg, malgo.DeviceCallbacks{Data: func(_, input []byte, _ uint32) {
 		defer func() {
@@ -183,10 +188,13 @@ func (m *MalgoDuplex) StartCapture(ctx context.Context, onSamples func([]float32
 		for i := range block {
 			block[i] = math.Float32frombits(binary.LittleEndian.Uint32(input[i*4 : i*4+4]))
 		}
-		select {
-		case queue <- block:
-		default:
-			m.droppedBlocks.Add(1)
+		if workerCtx.Err() != nil {
+			return
+		}
+		if discarded := enqueueCaptureBlock(queue, block); discarded > 0 {
+			// An ordered nil marker tells the downstream worker to reset its
+			// decoder state before consuming fresh audio.
+			m.droppedBlocks.Add(discarded)
 		}
 	}})
 	if err != nil {
@@ -218,9 +226,8 @@ func (m *MalgoDuplex) StartCapture(ctx context.Context, onSamples func([]float32
 			case <-workerCtx.Done():
 				return
 			case block := <-queue:
-				if len(block) != 0 {
-					onSamples(block)
-				}
+				// Nil marks a discontinuity and must reach the application layer.
+				onSamples(block)
 			}
 		}
 	}()
@@ -267,6 +274,57 @@ func (m *MalgoDuplex) StopCapture() error {
 // device remains started and emits digital silence between transmissions.
 // Playback is independent of the capture device, enabling software full-duplex.
 func (m *MalgoDuplex) Play(ctx context.Context, samples []float32, sampleRate int) error {
+	return m.PlayWithProgress(ctx, samples, sampleRate, nil)
+}
+
+// PreparePlayback initializes and starts the shared output endpoint ahead of
+// TX. Between transmissions the native callback emits silence, so the first
+// waveform does not pay device-open/start latency after PTT has been asserted.
+func (m *MalgoDuplex) PreparePlayback() error {
+	if m == nil {
+		return errors.New("audio engine is closed")
+	}
+	m.ctxMu.RLock()
+	defer m.ctxMu.RUnlock()
+	if m.ctx == nil || m.closed.Load() {
+		return errors.New("audio engine is closed")
+	}
+	m.playbackLifeMu.Lock()
+	defer m.playbackLifeMu.Unlock()
+	m.playbackMu.Lock()
+	if m.playbackJob != nil {
+		m.playbackMu.Unlock()
+		return ErrTransmitBusy
+	}
+	if m.playback == nil {
+		dev, err := m.newPlaybackDeviceLocked()
+		if err != nil {
+			m.playbackMu.Unlock()
+			return err
+		}
+		m.playback = dev
+	}
+	dev := m.playback
+	m.playbackMu.Unlock()
+	if dev.IsStarted() {
+		return nil
+	}
+	if err := dev.Start(); err != nil {
+		m.playbackMu.Lock()
+		if m.playback == dev && m.playbackJob == nil {
+			m.playback = nil
+		}
+		m.playbackMu.Unlock()
+		dev.Uninit()
+		return fmt.Errorf("start prepared playback device: %w", err)
+	}
+	return nil
+}
+
+// PlayWithProgress plays an SSTV waveform and polls the native callback's
+// consumed sample offset from a non-real-time goroutine. The native callback
+// stays lock-bounded and never calls Wails runtime code.
+func (m *MalgoDuplex) PlayWithProgress(ctx context.Context, samples []float32, sampleRate int, onProgress func(float64)) error {
 	if m == nil {
 		return errors.New("audio engine is closed")
 	}
@@ -330,15 +388,33 @@ func (m *MalgoDuplex) Play(ctx context.Context, samples []float32, sampleRate in
 	}
 	m.ctxMu.RUnlock()
 
-	select {
-	case <-job.done:
-		m.playbackMu.Lock()
-		jobErr := job.err
-		m.playbackMu.Unlock()
-		return jobErr
-	case <-ctx.Done():
-		m.finishPlaybackJob(job, ctx.Err())
-		return ctx.Err()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-job.done:
+			m.playbackMu.Lock()
+			jobErr := job.err
+			offset := len(samples)
+			m.playbackMu.Unlock()
+			if onProgress != nil && jobErr == nil {
+				onProgress(1)
+			}
+			_ = offset
+			return jobErr
+		case <-ticker.C:
+			if onProgress != nil {
+				m.playbackMu.Lock()
+				offset, total := job.offset, len(samples)
+				m.playbackMu.Unlock()
+				if total > 0 {
+					onProgress(math.Max(0, math.Min(1, float64(offset)/float64(total))))
+				}
+			}
+		case <-ctx.Done():
+			m.finishPlaybackJob(job, ctx.Err())
+			return ctx.Err()
+		}
 	}
 }
 
@@ -356,7 +432,7 @@ func (m *MalgoDuplex) newPlaybackDeviceLocked() (*malgo.Device, error) {
 		cfg.Playback.DeviceID = deviceID
 		defer freeMalgoDeviceID(deviceID)
 	}
-	dev, err := malgo.InitDevice(m.ctx.Context, cfg, malgo.DeviceCallbacks{Data: func(output, _ []byte, frameCount uint32) {
+	callbacks := malgo.DeviceCallbacks{Data: func(output, _ []byte, frameCount uint32) {
 		m.playbackMu.Lock()
 		defer m.playbackMu.Unlock()
 		job := m.playbackJob
@@ -379,11 +455,27 @@ func (m *MalgoDuplex) newPlaybackDeviceLocked() (*malgo.Device, error) {
 				m.playbackJob = nil
 			}
 		}
-	}})
-	if err != nil {
-		return nil, fmt.Errorf("initialize playback device: %w", err)
+	}}
+
+	// The output endpoint can report AUDCLNT_E_DEVICE_IN_USE while another
+	// application holds it exclusively or the audio service is still
+	// renegotiating the shared stream. Retry a few times before giving up.
+	const attempts = 5
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		dev, err := malgo.InitDevice(m.ctx.Context, cfg, callbacks)
+		if err == nil {
+			return dev, nil
+		}
+		if !errors.Is(err, malgo.ErrBusy) && !errors.Is(err, malgo.ErrAccessDenied) {
+			return nil, fmt.Errorf("initialize playback device: %w", err)
+		}
+		lastErr = err
+		if attempt < attempts {
+			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
+		}
 	}
-	return dev, nil
+	return nil, fmt.Errorf("initialize playback device after %d attempts: %w (output device is busy or held in exclusive mode by another application; close other audio programs or select a different TX output device)", attempts, lastErr)
 }
 
 func (m *MalgoDuplex) finishPlaybackJob(job *malgoPlaybackJob, reason error) {
@@ -426,9 +518,8 @@ func (m *MalgoDuplex) StopPlayback() error {
 	return stopErr
 }
 
-// DroppedCaptureBlocks reports input callback blocks dropped because the
-// bounded worker queue was full. A non-zero value indicates DSP/UI processing
-// is not keeping up with the selected capture rate.
+// DroppedCaptureBlocks reports input blocks discarded when the bounded native
+// capture queue overflowed. A discontinuity marker is forwarded to RX.
 func (m *MalgoDuplex) DroppedCaptureBlocks() uint64 {
 	if m == nil {
 		return 0

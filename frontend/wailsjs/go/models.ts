@@ -122,6 +122,30 @@ export namespace main {
 	        this.pttMode = source["pttMode"];
 	    }
 	}
+	export class ImageLibraryEntry {
+	    id: string;
+	    name: string;
+	    width: number;
+	    height: number;
+	    size: number;
+	    addedAt: string;
+	    thumbnail: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ImageLibraryEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.width = source["width"];
+	        this.height = source["height"];
+	        this.size = source["size"];
+	        this.addedAt = source["addedAt"];
+	        this.thumbnail = source["thumbnail"];
+	    }
+	}
 	export class Mode {
 	    id: string;
 	    name: string;
@@ -170,6 +194,9 @@ export namespace main {
 	    fontSize?: number;
 	    color?: string;
 	    bold?: boolean;
+	    outlineEnabled?: boolean;
+	    outlineWidth?: number;
+	    outlineColor?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new TemplateObject(source);
@@ -188,6 +215,9 @@ export namespace main {
 	        this.fontSize = source["fontSize"];
 	        this.color = source["color"];
 	        this.bold = source["bold"];
+	        this.outlineEnabled = source["outlineEnabled"];
+	        this.outlineWidth = source["outlineWidth"];
+	        this.outlineColor = source["outlineColor"];
 	    }
 	}
 	export class TemplateSlot {

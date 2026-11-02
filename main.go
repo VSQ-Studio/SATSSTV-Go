@@ -16,8 +16,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/BH2VSQ/SATSSTV-Go/internal/radio/ptt"
 	"github.com/BH2VSQ/SATSSTV-Go/internal/sstv"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -31,17 +33,30 @@ var assets embed.FS
 type App struct {
 	ctx context.Context
 
-	audioMu      sync.Mutex
-	rxOpMu       sync.Mutex
-	txOpMu       sync.Mutex // serializes TX start and audio-session replacement/close
-	audioSession appAudioRuntime
-	audioConfig  AudioSettings
-	rxCancel     context.CancelFunc
-	txCancel     context.CancelFunc
-	txGeneration uint64 // prevents an older TX worker from clearing a newer TX state
-	rxDecoderMu  sync.Mutex
-	rxDecoder    *sstv.StreamDecoder
-	albumMu      sync.Mutex
+	audioMu           sync.Mutex
+	rxOpMu            sync.Mutex
+	txOpMu            sync.Mutex // serializes TX start and audio-session replacement/close
+	audioSession      appAudioRuntime
+	audioConfig       AudioSettings
+	rxCancel          context.CancelFunc
+	txCancel          context.CancelFunc
+	txGeneration      uint64 // prevents an older TX worker from clearing a newer TX state
+	pttTestMu         sync.Mutex
+	pttTestController ptt.Controller
+	pttTestCancel     context.CancelFunc
+	pttTestGeneration uint64
+	shuttingDown      atomic.Bool
+	rxDecoderMu       sync.Mutex
+	rxDecoder         *sstv.StreamDecoder
+	rxModeRequest     atomic.Pointer[string]
+	rxQueueDrops      atomic.Uint64
+	albumMu           sync.Mutex
+	imageLibraryMu    sync.Mutex
+
+	dumpMu    sync.Mutex
+	dumpBuf   []float32 // fixed-size circular buffer of recent raw captured float samples
+	dumpWrite int
+	dumpCount int
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -80,6 +95,9 @@ func (a *App) GetModes() []Mode {
 	}
 	return out
 }
+
+// ListSerialPorts returns the COM ports currently available for serial PTT.
+func (a *App) ListSerialPorts() []string { return listSerialPorts() }
 
 func (a *App) SelectImage() string {
 	p, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
@@ -293,7 +311,9 @@ func (a *App) GetLatestRXImage() (string, error) {
 		}
 		return "data:image/png;base64," + base64.StdEncoding.EncodeToString(data), nil
 	}
-	return "", fmt.Errorf("相册中还没有接收图像")
+	// No previous RX image is a normal state. The frontend renders an empty
+	// last-RX placeholder and fills it when the first frame is received.
+	return "", nil
 }
 
 // DeleteAlbumImage removes one archived image and its index entry.
@@ -338,11 +358,13 @@ func (a *App) SaveAlbumImage(dataURL, kind, mode, status string) (AlbumEntry, er
 }
 
 func (a *App) ImportAlbumImage(kind string) (AlbumEntry, error) {
-	if kind != "rx" && kind != "tx" {
-		return AlbumEntry{}, fmt.Errorf("无效的相册分类")
+	// RX images are generated from the live receiver and archived automatically.
+	// Only TX drafts may be manually imported into the album.
+	if kind != "tx" {
+		return AlbumEntry{}, fmt.Errorf("仅允许导入 TX 图像，RX 图像由实时接收自动归档")
 	}
 	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
-		Title: "导入历史图像到相册", Filters: []runtime.FileFilter{{DisplayName: "图片文件", Pattern: "*.png;*.jpg;*.jpeg"}},
+		Title: "导入 TX 历史图像到相册", Filters: []runtime.FileFilter{{DisplayName: "图片文件", Pattern: "*.png;*.jpg;*.jpeg"}},
 	})
 	if err != nil {
 		return AlbumEntry{}, err

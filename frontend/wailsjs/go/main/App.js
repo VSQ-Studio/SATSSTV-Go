@@ -6,8 +6,16 @@ export function ApplyAudioSettings(arg1, arg2) {
   return window['go']['main']['App']['ApplyAudioSettings'](arg1, arg2);
 }
 
+export function ClearTXBackground() {
+  return window['go']['main']['App']['ClearTXBackground']();
+}
+
 export function DeleteAlbumImage(arg1) {
   return window['go']['main']['App']['DeleteAlbumImage'](arg1);
+}
+
+export function DeleteImageLibraryImage(arg1) {
+  return window['go']['main']['App']['DeleteImageLibraryImage'](arg1);
 }
 
 export function EncodeImageData(arg1, arg2, arg3, arg4) {
@@ -42,12 +50,20 @@ export function GetStationSettings() {
   return window['go']['main']['App']['GetStationSettings']();
 }
 
+export function GetTXBackground() {
+  return window['go']['main']['App']['GetTXBackground']();
+}
+
 export function GetTemplateSlots() {
   return window['go']['main']['App']['GetTemplateSlots']();
 }
 
 export function ImportAlbumImage(arg1) {
   return window['go']['main']['App']['ImportAlbumImage'](arg1);
+}
+
+export function ImportImageToLibrary() {
+  return window['go']['main']['App']['ImportImageToLibrary']();
 }
 
 export function InitializeAudio(arg1) {
@@ -58,8 +74,20 @@ export function ListAlbum() {
   return window['go']['main']['App']['ListAlbum']();
 }
 
+export function ListImageLibrary() {
+  return window['go']['main']['App']['ListImageLibrary']();
+}
+
+export function ListSerialPorts() {
+  return window['go']['main']['App']['ListSerialPorts']();
+}
+
 export function LoadAlbumPreview(arg1) {
   return window['go']['main']['App']['LoadAlbumPreview'](arg1);
+}
+
+export function LoadImageLibraryImage(arg1) {
+  return window['go']['main']['App']['LoadImageLibraryImage'](arg1);
 }
 
 export function LoadImagePreview(arg1) {
@@ -70,8 +98,16 @@ export function SaveAlbumImage(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['SaveAlbumImage'](arg1, arg2, arg3, arg4);
 }
 
+export function SaveCapturedAudio() {
+  return window['go']['main']['App']['SaveCapturedAudio']();
+}
+
 export function SaveStationSettings(arg1) {
   return window['go']['main']['App']['SaveStationSettings'](arg1);
+}
+
+export function SaveTXBackground(arg1) {
+  return window['go']['main']['App']['SaveTXBackground'](arg1);
 }
 
 export function SaveTemplateSlots(arg1) {
@@ -82,8 +118,24 @@ export function SelectImage() {
   return window['go']['main']['App']['SelectImage']();
 }
 
+export function SetRXEnabled(arg1, arg2) {
+  return window['go']['main']['App']['SetRXEnabled'](arg1, arg2);
+}
+
+export function StartPTTTest(arg1) {
+  return window['go']['main']['App']['StartPTTTest'](arg1);
+}
+
 export function StartTX(arg1, arg2, arg3) {
   return window['go']['main']['App']['StartTX'](arg1, arg2, arg3);
+}
+
+export function StartTone(arg1) {
+  return window['go']['main']['App']['StartTone'](arg1);
+}
+
+export function StopPTTTest() {
+  return window['go']['main']['App']['StopPTTTest']();
 }
 
 export function StopTX() {
